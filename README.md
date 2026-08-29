@@ -4,6 +4,10 @@ A small webhook service that reacts to TradingView alerts automatically:
 it receives the alert, enriches it with live market data from the
 Crypto.com Exchange public API, and logs the combined result.
 
+Forex alerts that carry a stop price also get a **position size for your
+account** attached — see [`strategy/`](strategy/) for the swing-trading
+strategy that produces them, sized for a 500 EUR account.
+
 ## How it works
 
 1. You create an alert in TradingView with a webhook URL pointing at this
@@ -53,16 +57,52 @@ For TradingView to reach it, the service needs a public HTTPS URL — deploy it
    }
    ```
 
-   Only `secret` and `symbol` are required; `action`, `price`, `message`,
-   and `time` are stored as-is if present. Adjust the placeholders to match
-   whatever indicator/strategy variables are available on your alert.
+   Only `secret` and `symbol` are required; `action`, `price`, `stop`,
+   `message`, and `time` are stored as-is if present. Adjust the placeholders
+   to match whatever indicator/strategy variables are available on your alert.
+
+   An FX alert that includes both `price` and `stop` is sized automatically
+   for the account configured in `.env` (see below).
+
+## The forex strategy
+
+[`strategy/`](strategy/) contains a complete daily-bar swing strategy — trades
+held from a day to a few weeks — together with a Pine Script implementation
+that emits the alerts above, a Python backtester, and an honest account of what
+has and has not been validated.
+
+- [strategy/README.md](strategy/README.md) — the rules, and why a 500 EUR
+  account needs a nano-lot broker to trade them at all
+- [strategy/RESULTS.md](strategy/RESULTS.md) — what was measured, including the
+  finding that overnight financing is 94% of this strategy's trading cost
+- [strategy/backtest/](strategy/backtest/) — the backtester and its test suite
+
+## Position sizing
+
+`src/positionSizing.js` turns an alert into a number of units for your account,
+respecting your broker's minimum position and lot step. When the smallest legal
+trade would exceed your risk budget it returns a `skippedReason` instead of a
+size — which, on a 500 EUR account at a 0.01-lot broker, is most of the time.
+
+Configure it in `.env`:
+
+```
+ACCOUNT_EQUITY_EUR=500
+RISK_PER_TRADE=0.01
+LOT_STEP_UNITS=100
+MIN_UNITS=100
+MAX_LEVERAGE=30
+QUOTE_RATES_JSON={"USD":1.09,"JPY":158,"GBP":0.85,"CHF":0.94,"CAD":1.48,"AUD":1.63,"NZD":1.79}
+```
+
+Sizing is advisory. Nothing in this service places orders with a broker.
 
 ## API
 
 - `POST /webhook/tradingview` — receives an alert, returns
-  `{ "status": "logged", "instrumentName": "BTC_USDT" }` on success, or
-  `400` with an error message if the payload is invalid or the secret is
-  wrong.
+  `{ "status": "logged", "instrumentName": "BTC_USDT", "sizing": null }` on
+  success, or `400` with an error message if the payload is invalid or the
+  secret is wrong. `sizing` is populated for FX alerts that carry a `stop`.
 - `GET /alerts?limit=50` — returns the most recently logged alerts (newest
   first).
 - `GET /health` — liveness check.

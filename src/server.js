@@ -3,12 +3,14 @@ import { parseAlert, InvalidAlertError } from './tradingview.js';
 import { normalizeSymbol } from './symbolMap.js';
 import { enrichWithMarketData } from './marketData.js';
 import { logAlert, readAlerts } from './logger.js';
+import { sizeAlert, sizingConfigFromEnv } from './positionSizing.js';
 
 const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const WEBHOOK_SECRET = process.env.TRADINGVIEW_WEBHOOK_SECRET || '';
+const SIZING_CONFIG = sizingConfigFromEnv();
 
 app.post('/webhook/tradingview', async (req, res) => {
   let alert;
@@ -31,11 +33,14 @@ app.post('/webhook/tradingview', async (req, res) => {
     }
   }
 
-  const entry = { ...alert, instrumentName, marketData };
+  // FX alerts that carry a stop get a position size for the configured
+  // account attached; everything else passes through untouched.
+  const sizing = sizeAlert(alert, SIZING_CONFIG);
+  const entry = { ...alert, instrumentName, marketData, sizing };
   await logAlert(entry);
 
   console.log(`[tradingview] logged alert for ${alert.symbol}${instrumentName ? ` (${instrumentName})` : ''}`);
-  res.status(200).json({ status: 'logged', instrumentName });
+  res.status(200).json({ status: 'logged', instrumentName, sizing });
 });
 
 app.get('/alerts', async (req, res) => {

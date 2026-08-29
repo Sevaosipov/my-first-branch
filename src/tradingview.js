@@ -8,7 +8,7 @@ export function parseAlert(body, expectedSecret) {
     throw new InvalidAlertError('Alert body must be a JSON object');
   }
 
-  const { secret, symbol, action, price, message, time } = body;
+  const { secret, symbol, action, price, stop, message, time } = body;
 
   if (expectedSecret && secret !== expectedSecret) {
     throw new InvalidAlertError('Invalid or missing webhook secret');
@@ -22,6 +22,9 @@ export function parseAlert(body, expectedSecret) {
     symbol,
     action: typeof action === 'string' ? action : null,
     price: price !== undefined && price !== null && price !== '' ? Number(price) : null,
+    // Protective stop, when the alert carries one. Strategies that send it can
+    // have their position size computed on arrival (see positionSizing.js).
+    stop: stop !== undefined && stop !== null && stop !== '' ? Number(stop) : null,
     message: typeof message === 'string' ? message : null,
     time: typeof time === 'string' ? time : null,
     receivedAt: new Date().toISOString(),

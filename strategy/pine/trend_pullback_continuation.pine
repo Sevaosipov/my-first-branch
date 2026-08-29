@@ -1,0 +1,168 @@
+//@version=5
+//
+// Trend Pullback Continuation (TPC) -- daily-bar FX swing strategy.
+//
+// Same rules as strategy/backtest/swingfx/strategy.py, so a TradingView
+// backtest and the Python backtest of the same pair should agree closely.
+// Indicator seeding matches on purpose: Pine's ta.ema/ta.rma seed from an SMA,
+// and swingfx/indicators.py reproduces that.
+//
+// Apply to a DAILY chart of a major (EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD).
+//
+// Alerts POST the JSON body that this repo's webhook receiver expects
+// (see src/tradingview.js). To wire it up:
+//   1. Add the strategy to a daily chart.
+//   2. Set "Webhook secret" below to the same value as
+//      TRADINGVIEW_WEBHOOK_SECRET in your .env.
+//   3. Create an alert -> Condition: this strategy -> "Any alert() function call".
+//      Leave the alert's own message box EMPTY; the script supplies the JSON.
+//   4. Notifications tab -> Webhook URL -> https://<your-host>/webhook/tradingview
+//
+// SECURITY: the webhook secret is stored in the script's settings, so keep the
+// script and the chart private, and rotate the secret if you ever share either.
+
+strategy("Trend Pullback Continuation (FX Swing)",
+     overlay              = true,
+     currency             = currency.EUR,
+     initial_capital      = 500,
+     default_qty_type     = strategy.fixed,
+     default_qty_value    = 1,
+     pyramiding           = 0,
+     calc_on_every_tick   = false,
+     process_orders_on_close = false,
+     commission_type      = strategy.commission.percent,
+     commission_value     = 0.0035)
+
+// ----------------------------------------------------------------- inputs
+grpT = "Trend regime"
+emaFastLen = input.int(50,  "Fast EMA",            group = grpT, minval = 2)
+emaSlowLen = input.int(200, "Slow EMA",            group = grpT, minval = 5)
+momLen     = input.int(60,  "Momentum lookback",   group = grpT, minval = 2)
+
+grpE = "Pullback entry"
+rsiLen      = input.int(14,   "RSI length",              group = grpE, minval = 2)
+rsiDip      = input.float(42, "Long setup: RSI dips below", group = grpE)
+dipLookback = input.int(5,    "Dip window (bars)",       group = grpE, minval = 1)
+breakoutBars= input.int(2,    "Close must clear high of N bars", group = grpE, minval = 1)
+
+grpV = "Volatility gate"
+atrLen    = input.int(14,      "ATR length",        group = grpV, minval = 2)
+minAtrPct = input.float(0.30,  "Min ATR % of price", group = grpV, step = 0.05)
+maxAtrPct = input.float(2.00,  "Max ATR % of price", group = grpV, step = 0.05)
+
+grpR = "Risk geometry"
+atrStopMult  = input.float(2.0,  "Initial stop (x ATR)",     group = grpR, step = 0.1)
+atrTrailMult = input.float(3.0,  "Chandelier trail (x ATR)", group = grpR, step = 0.1)
+trailStartR  = input.float(1.0,  "Start trailing after (R)", group = grpR, step = 0.1)
+timeStopBars = input.int(15,     "Time stop (bars)",         group = grpR, minval = 1)
+timeStopMinR = input.float(0.5,  "...unless trade is above (R)", group = grpR, step = 0.1)
+riskPct      = input.float(1.0,  "Risk per trade (% equity)", group = grpR, step = 0.1)
+
+grpS = "Direction"
+allowLong  = input.bool(true, "Allow longs",  group = grpS)
+allowShort = input.bool(true, "Allow shorts", group = grpS)
+
+grpW = "Webhook"
+webhookSecret = input.string("change-me", "Webhook secret", group = grpW)
+
+// ------------------------------------------------------------- indicators
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+mom     = close / close[momLen] - 1.0
+rsi     = ta.rsi(close, rsiLen)
+atr     = ta.atr(atrLen)
+atrPct  = atr / close * 100.0
+
+rsiMin    = ta.lowest(rsi, dipLookback)
+rsiMax    = ta.highest(rsi, dipLookback)
+priorHigh = ta.highest(high, breakoutBars)[1]
+priorLow  = ta.lowest(low, breakoutBars)[1]
+
+volOk     = atrPct >= minAtrPct and atrPct <= maxAtrPct
+upTrend   = emaFast > emaSlow and close > emaSlow
+downTrend = emaFast < emaSlow and close < emaSlow
+
+longSignal  = allowLong  and upTrend   and mom > 0 and volOk and rsiMin < rsiDip and close > priorHigh
+shortSignal = allowShort and downTrend and mom < 0 and volOk and rsiMax > (100.0 - rsiDip) and close < priorLow
+
+// -------------------------------------------------------------- position
+// Stop distance uses the ATR of the *signal* bar, which is the value known
+// when the order is placed. The fill happens at the next bar's open.
+var float entryPrice = na
+var float rPrice     = na
+var float stopLevel  = na
+var float extreme    = na
+
+flat = strategy.position_size == 0
+
+// Units sized so a stop-out costs `riskPct` of equity. TradingView quotes FX
+// quantities in units of the base currency; this ignores the quote->EUR
+// conversion, so treat it as approximate. swingfx/sizing.py does it exactly.
+stopDist   = atrStopMult * atr
+riskCash   = strategy.equity * riskPct / 100.0
+rawQty     = stopDist > 0 ? riskCash / stopDist : 0
+qty        = math.max(math.floor(rawQty / 100) * 100, 100)
+
+if flat and longSignal
+    strategy.entry("L", strategy.long, qty = qty)
+if flat and shortSignal
+    strategy.entry("S", strategy.short, qty = qty)
+
+justEntered = strategy.position_size != 0 and strategy.position_size[1] == 0
+if justEntered
+    entryPrice := strategy.position_avg_price
+    rPrice     := atrStopMult * atr[1]
+    stopLevel  := strategy.position_size > 0 ? entryPrice - rPrice : entryPrice + rPrice
+    extreme    := entryPrice
+
+if strategy.position_size != 0
+    dir     = strategy.position_size > 0 ? 1 : -1
+    extreme := dir == 1 ? math.max(extreme, high) : math.min(extreme, low)
+    bestR   = (extreme - entryPrice) * dir / rPrice
+
+    if bestR >= trailStartR
+        chandelier = extreme - dir * atrTrailMult * atr
+        stopLevel := dir == 1 ? math.max(stopLevel, chandelier) : math.min(stopLevel, chandelier)
+
+    if dir == 1
+        strategy.exit("L-exit", from_entry = "L", stop = stopLevel)
+    else
+        strategy.exit("S-exit", from_entry = "S", stop = stopLevel)
+
+    barsHeld = bar_index - strategy.opentrades.entry_bar_index(0)
+    curR     = (close - entryPrice) * dir / rPrice
+    if barsHeld >= timeStopBars and curR < timeStopMinR
+        strategy.close_all(comment = "time stop")
+
+// ----------------------------------------------------------------- alerts
+// Matches parseAlert() in src/tradingview.js: secret, symbol, action, price,
+// stop, message, time. The receiver sizes the trade for your account from
+// `price` and `stop` (src/positionSizing.js), so send the stop as its own
+// field rather than burying it in the text. Keep `note` free of double quotes
+// so the JSON stays valid.
+f_alert(action, stopPrice, note) =>
+    '{"secret":"' + webhookSecret +
+     '","symbol":"' + syminfo.ticker +
+     '","action":"' + action +
+     '","price":"' + str.tostring(close, format.mintick) +
+     '","stop":"' + str.tostring(stopPrice, format.mintick) +
+     '","message":"' + note +
+     '","time":"' + str.format_time(time_close, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC") + '"}'
+
+if flat and longSignal
+    alert(f_alert("buy", close - stopDist, "TPC long setup, enter at next open"),
+         alert.freq_once_per_bar_close)
+if flat and shortSignal
+    alert(f_alert("sell", close + stopDist, "TPC short setup, enter at next open"),
+         alert.freq_once_per_bar_close)
+
+// ------------------------------------------------------------------ plots
+plot(emaFast, "EMA fast", color = color.new(color.orange, 0), linewidth = 1)
+plot(emaSlow, "EMA slow", color = color.new(color.blue, 0), linewidth = 2)
+plot(strategy.position_size != 0 ? stopLevel : na, "Stop", color = color.new(color.red, 0),
+     style = plot.style_linebr, linewidth = 2)
+bgcolor(upTrend ? color.new(color.green, 92) : downTrend ? color.new(color.red, 92) : na)
+plotshape(flat and longSignal,  "Long setup",  shape.triangleup,   location.belowbar,
+     color.new(color.green, 0), size = size.tiny)
+plotshape(flat and shortSignal, "Short setup", shape.triangledown, location.abovebar,
+     color.new(color.red, 0),   size = size.tiny)
